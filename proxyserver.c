@@ -48,6 +48,7 @@ void send_error_response(int client_fd, status_code_t err_code, char *err_msg) {
  * forward the client request to the fileserver and
  * forward the fileserver response to the client
  */
+// Create multiple threads that run serve request
 void serve_request(int client_fd) {
 
     // create a fileserver socket
@@ -104,6 +105,18 @@ void serve_request(int client_fd) {
     free(buffer);
 }
 
+void *handle_client_request(void *arg) {
+    int client_fd = *(int *)arg;
+    free(arg);  // Free the memory allocated for the client file descriptor
+
+    serve_request(client_fd);  // Process the request
+
+    // Clean up
+    shutdown(client_fd, SHUT_WR);
+    close(client_fd);
+
+    return NULL;
+}
 
 int server_fd;
 /*
@@ -152,29 +165,35 @@ void serve_forever(int *server_fd) {
 
     printf("Listening on port %d...\n", proxy_port);
 
-    struct sockaddr_in client_address;
-    size_t client_address_length = sizeof(client_address);
-    int client_fd;
     while (1) {
-        client_fd = accept(*server_fd,
-                           (struct sockaddr *)&client_address,
-                           (socklen_t *)&client_address_length);
-        if (client_fd < 0) {
+        struct sockaddr_in client_address;
+        socklen_t client_address_length = sizeof(client_address);
+        int *client_fd_ptr = malloc(sizeof(int));  // Dynamically allocate memory to pass to the thread
+
+        *client_fd_ptr = accept(*server_fd, (struct sockaddr *)&client_address, &client_address_length);
+        if (*client_fd_ptr < 0) {
             perror("Error accepting socket");
+            free(client_fd_ptr);  // Free the memory if accept fails
             continue;
         }
 
         printf("Accepted connection from %s on port %d\n",
                inet_ntoa(client_address.sin_addr),
-               client_address.sin_port);
+               ntohs(client_address.sin_port));
 
-        serve_request(client_fd);
+        // Creating a new thread for each accepted connection
+        pthread_t thread;
+        if (pthread_create(&thread, NULL, handle_client_request, client_fd_ptr) != 0) {
+            perror("Failed to create thread");
+            free(client_fd_ptr);  // Free the memory if thread creation fails
+            continue;
+        }
 
-        // close the connection to the client
-        shutdown(client_fd, SHUT_WR);
-        close(client_fd);
+        // Detach the thread
+        pthread_detach(thread);
     }
 
+    // Close the server socket
     shutdown(*server_fd, SHUT_RDWR);
     close(*server_fd);
 }

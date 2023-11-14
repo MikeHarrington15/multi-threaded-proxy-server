@@ -1,7 +1,7 @@
 CC=gcc
 CFLAGS=-ggdb3 -c -Wall -Werror -std=gnu99
 LDFLAGS=-pthread
-SOURCES=proxyserver.c safequeue.c
+SOURCES=proxyserver.c #safequeue.c
 OBJECTS=$(SOURCES:.c=.o)
 EXECUTABLE=proxyserver
 
