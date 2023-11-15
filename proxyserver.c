@@ -15,6 +15,7 @@
 #include <unistd.h>
 
 #include "proxyserver.h"
+#include "safepqueue.h"
 
 
 /*
@@ -33,6 +34,8 @@ int num_workers;
 char *fileserver_ipaddr;
 int fileserver_port;
 int max_queue_size;
+
+PriorityQueue pq;
 
 void send_error_response(int client_fd, status_code_t err_code, char *err_msg) {
     http_start_response(client_fd, err_code);
@@ -118,59 +121,63 @@ void *handle_client_request(void *arg) {
     return NULL;
 }
 
+int get_request_priority(const char *request) {
+    // Placeholder implementation - replace with actual logic
+    // For example, parse the request string to determine its priority
+    return 1; // Default priority
+}
+
 int server_fd;
 /*
  * opens a TCP stream socket on all interfaces with port number PORTNO. Saves
  * the fd number of the server socket in *socket_number. For each accepted
  * connection, calls request_handler with the accepted fd number.
  */
-void serve_forever(int *server_fd) {
+void *serve_forever(void *arg) {
+    int listener_port = *(int *)arg;
+    free(arg); // Free the dynamically allocated memory for the port number
 
-    // create a socket to listen
-    *server_fd = socket(PF_INET, SOCK_STREAM, 0);
-    if (*server_fd == -1) {
+    int server_fd = socket(PF_INET, SOCK_STREAM, 0);
+    if (server_fd == -1) {
         perror("Failed to create a new socket");
         exit(errno);
     }
 
     // manipulate options for the socket
     int socket_option = 1;
-    if (setsockopt(*server_fd, SOL_SOCKET, SO_REUSEADDR, &socket_option,
+    if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &socket_option,
                    sizeof(socket_option)) == -1) {
         perror("Failed to set socket options");
         exit(errno);
     }
 
-
-    int proxy_port = listener_ports[0];
-    // create the full address of this proxyserver
     struct sockaddr_in proxy_address;
     memset(&proxy_address, 0, sizeof(proxy_address));
     proxy_address.sin_family = AF_INET;
     proxy_address.sin_addr.s_addr = INADDR_ANY;
-    proxy_address.sin_port = htons(proxy_port); // listening port
+    proxy_address.sin_port = htons(listener_port); // use listener_port
 
-    // bind the socket to the address and port number specified in
-    if (bind(*server_fd, (struct sockaddr *)&proxy_address,
+    // bind the socket to the address and port number
+    if (bind(server_fd, (struct sockaddr *)&proxy_address,
              sizeof(proxy_address)) == -1) {
         perror("Failed to bind on socket");
         exit(errno);
     }
 
     // starts waiting for the client to request a connection
-    if (listen(*server_fd, 1024) == -1) {
+    if (listen(server_fd, 1024) == -1) {
         perror("Failed to listen on socket");
         exit(errno);
     }
 
-    printf("Listening on port %d...\n", proxy_port);
+    printf("Listening on port %d...\n", listener_port);
 
     while (1) {
         struct sockaddr_in client_address;
         socklen_t client_address_length = sizeof(client_address);
         int *client_fd_ptr = malloc(sizeof(int));  // Dynamically allocate memory to pass to the thread
 
-        *client_fd_ptr = accept(*server_fd, (struct sockaddr *)&client_address, &client_address_length);
+        *client_fd_ptr = accept(server_fd, (struct sockaddr *)&client_address, &client_address_length);
         if (*client_fd_ptr < 0) {
             perror("Error accepting socket");
             free(client_fd_ptr);  // Free the memory if accept fails
@@ -194,8 +201,8 @@ void serve_forever(int *server_fd) {
     }
 
     // Close the server socket
-    shutdown(*server_fd, SHUT_RDWR);
-    close(*server_fd);
+    shutdown(server_fd, SHUT_RDWR);
+    close(server_fd);
 }
 
 /*
@@ -273,7 +280,35 @@ int main(int argc, char **argv) {
     }
     print_settings();
 
-    serve_forever(&server_fd);
+    init_priority_queue(&pq, max_queue_size);
 
+    pthread_t *threads = malloc(num_listener * sizeof(pthread_t));
+    if (!threads) {
+        perror("Failed to allocate memory for threads");
+        exit(EXIT_FAILURE);
+    }
+
+    for (int i = 0; i < num_listener; i++) {
+        int *port_ptr = malloc(sizeof(int)); // Allocate memory for port number
+        if (!port_ptr) {
+            perror("Failed to allocate memory for port number");
+            exit(EXIT_FAILURE);
+        }
+
+        *port_ptr = listener_ports[i];
+        if (pthread_create(&threads[i], NULL, serve_forever, port_ptr) != 0) {
+            perror("Failed to create listener thread");
+            exit(EXIT_FAILURE);
+        }
+    }
+
+    // Join threads (optional, based on your design)
+    for (int i = 0; i < num_listener; i++) {
+        pthread_join(threads[i], NULL);
+    }
+
+    free(threads);
+    free(listener_ports); // Assuming this was dynamically allocated
+    destroy_priority_queue(&pq);
     return EXIT_SUCCESS;
 }
