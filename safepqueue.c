@@ -3,6 +3,8 @@
 #include <string.h>
 #include <stdio.h>
 
+FILE *file_q;
+
 int is_queue_full(PriorityQueue *pq) {
     pthread_mutex_lock(&pq->mutex);
     int isFull = (pq->size == pq->capacity);
@@ -17,7 +19,7 @@ int is_queue_empty(PriorityQueue *pq) {
     return isEmpty;
 }
 
-void init_priority_queue(PriorityQueue *pq, int capacity) {
+void create_queue(PriorityQueue *pq, int capacity) {
     pq->elements = malloc(sizeof(PriorityQueueElement) * capacity);
     pq->size = 0;
     pq->capacity = capacity;
@@ -25,7 +27,7 @@ void init_priority_queue(PriorityQueue *pq, int capacity) {
     pthread_cond_init(&pq->cond_var, NULL);
 }
 
-void enqueue(PriorityQueue *pq, const char *request, int priority, int client_fd) {
+void add_work(PriorityQueue *pq, const char *request, int priority, int client_fd) {
     pthread_mutex_lock(&pq->mutex);
 
     if (pq->size == pq->capacity) {
@@ -58,25 +60,39 @@ void enqueue(PriorityQueue *pq, const char *request, int priority, int client_fd
     pthread_mutex_unlock(&pq->mutex);
 }
 
-PriorityQueueElement dequeue(PriorityQueue *pq) {
-    pthread_mutex_lock(&pq->mutex);
-
-    while (pq->size == 0) {
-        pthread_cond_wait(&pq->cond_var, &pq->mutex);
+PriorityQueueElement get_work(PriorityQueue *pq) {
+    FILE *file_q = fopen("q_log.txt", "w");
+    if (file_q == NULL) {
+        perror("Error opening q_log.txt");
     }
+
+    fprintf(file_q, "In Dequeue\n");
+    fflush(file_q);
+
+
+    fprintf(file_q, "Checking size of Dequeue\n");
+    fflush(file_q);
+
+    if (pq->size == 0) {
+        fprintf(file_q, "Queue is empty\n");
+        fflush(file_q);
+        fclose(file_q);
+        pthread_mutex_unlock(&pq->mutex);
+
+        PriorityQueueElement errorElement = {0};
+        return errorElement;
+    }
+
+    fprintf(file_q, "Grabbing element\n");
+    fflush(file_q);
 
     PriorityQueueElement element = pq->elements[pq->size - 1];
     pq->size--;
 
-    pthread_mutex_unlock(&pq->mutex);
-    return element;
-}
+    fprintf(file_q, "Grabbed %d, %s\n", element.client_fd, element.request);
+    fprintf(file_q, "Queue size after removal: %d\n", pq->size);
+    fflush(file_q);
+    fclose(file_q);
 
-void destroy_priority_queue(PriorityQueue *pq) {
-    for (int i = 0; i < pq->size; i++) {
-        free(pq->elements[i].request);
-    }
-    free(pq->elements);
-    pthread_mutex_destroy(&pq->mutex);
-    pthread_cond_destroy(&pq->cond_var);
+    return element;
 }

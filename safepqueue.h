@@ -20,11 +20,10 @@ typedef struct {
 } PriorityQueue;
 
 // Function declarations
-void init_priority_queue(PriorityQueue *pq, int capacity);
+void create_queue(PriorityQueue *pq, int capacity);
 int is_queue_full(PriorityQueue *pq);
 int is_queue_empty(PriorityQueue *pq);
-void enqueue(PriorityQueue *pq, const char *request, int priority, int client_fd);
-PriorityQueueElement dequeue(PriorityQueue *pq);
-void destroy_priority_queue(PriorityQueue *pq);
+void add_work(PriorityQueue *pq, const char *request, int priority, int client_fd);
+PriorityQueueElement get_work(PriorityQueue *pq);
 
 #endif // SAFE_PQUEUE_H
