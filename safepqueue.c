@@ -3,6 +3,20 @@
 #include <string.h>
 #include <stdio.h>
 
+int is_queue_full(PriorityQueue *pq) {
+    pthread_mutex_lock(&pq->mutex);
+    int isFull = (pq->size == pq->capacity);
+    pthread_mutex_unlock(&pq->mutex);
+    return isFull;
+}
+
+int is_queue_empty(PriorityQueue *pq) {
+    pthread_mutex_lock(&pq->mutex);
+    int isEmpty = (pq->size == 0);
+    pthread_mutex_unlock(&pq->mutex);
+    return isEmpty;
+}
+
 void init_priority_queue(PriorityQueue *pq, int capacity) {
     pq->elements = malloc(sizeof(PriorityQueueElement) * capacity);
     pq->size = 0;
@@ -11,7 +25,7 @@ void init_priority_queue(PriorityQueue *pq, int capacity) {
     pthread_cond_init(&pq->cond_var, NULL);
 }
 
-void enqueue(PriorityQueue *pq, const char *request, int priority) {
+void enqueue(PriorityQueue *pq, const char *request, int priority, int client_fd) {
     pthread_mutex_lock(&pq->mutex);
 
     if (pq->size == pq->capacity) {
@@ -20,12 +34,25 @@ void enqueue(PriorityQueue *pq, const char *request, int priority) {
         return;
     }
 
-    printf("Enqueuing request with priority %d\n", priority);
-    pq->elements[pq->size].request = strdup(request);
-    pq->elements[pq->size].priority = priority;
+    // Find the position to insert the new element
+    int insertPos = 0;
+    for (insertPos = pq->size; insertPos > 0; insertPos--) {
+        if (pq->elements[insertPos - 1].priority > priority) {
+            // Shift element back to make room for the new element
+            pq->elements[insertPos] = pq->elements[insertPos - 1];
+        } else {
+            // Correct position found
+            break;
+        }
+    }
+
+    // Insert the new element
+    pq->elements[pq->size].client_fd = client_fd;
+    pq->elements[insertPos].request = strdup(request);
+    pq->elements[insertPos].priority = priority;
     pq->size++;
 
-    // TODO: Implement priority insertion logic
+    printf("Enqueued request with priority %d\n", priority);
 
     pthread_cond_signal(&pq->cond_var);
     pthread_mutex_unlock(&pq->mutex);
@@ -38,8 +65,6 @@ PriorityQueueElement dequeue(PriorityQueue *pq) {
         pthread_cond_wait(&pq->cond_var, &pq->mutex);
     }
 
-    // TODO: Implement priority dequeue logic
-    // For now, dequeueing the last element
     PriorityQueueElement element = pq->elements[pq->size - 1];
     pq->size--;
 

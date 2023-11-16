@@ -17,11 +17,11 @@
 #include "proxyserver.h"
 #include "safepqueue.h"
 
-
 /*
  * Constants
  */
 #define RESPONSE_BUFSIZE 10000
+#define REQUEST_BUFSIZE 10000
 
 /*
  * Global configuration variables.
@@ -36,6 +36,7 @@ int fileserver_port;
 int max_queue_size;
 
 PriorityQueue pq;
+FILE *log_file;
 
 void send_error_response(int client_fd, status_code_t err_code, char *err_msg) {
     http_start_response(client_fd, err_code);
@@ -108,31 +109,24 @@ void serve_request(int client_fd) {
     free(buffer);
 }
 
-void *handle_client_request(void *arg) {
-    int client_fd = *(int *)arg;
-    free(arg);  // Free the memory allocated for the client file descriptor
-
-    serve_request(client_fd);  // Process the request
-
-    // Clean up
-    shutdown(client_fd, SHUT_WR);
-    close(client_fd);
-
-    return NULL;
-}
-
 int get_request_priority(const char *request) {
-    // Placeholder implementation - replace with actual logic
-    // For example, parse the request string to determine its priority
-    return 1; // Default priority
+    const char *start = strchr(request, '/');
+    if (start != NULL) {
+        start++; // Move past the first '/'
+        const char *end = strchr(start, '/');
+        if (end != NULL) {
+            size_t length = end - start;
+            char *priorityStr = strndup(start, length);
+            int priority = atoi(priorityStr);
+            free(priorityStr);
+            return priority;
+        }
+    }
+    return -1;
 }
 
 int server_fd;
-/*
- * opens a TCP stream socket on all interfaces with port number PORTNO. Saves
- * the fd number of the server socket in *socket_number. For each accepted
- * connection, calls request_handler with the accepted fd number.
- */
+
 void *serve_forever(void *arg) {
     int listener_port = *(int *)arg;
     free(arg); // Free the dynamically allocated memory for the port number
@@ -188,16 +182,40 @@ void *serve_forever(void *arg) {
                inet_ntoa(client_address.sin_addr),
                ntohs(client_address.sin_port));
 
-        // Creating a new thread for each accepted connection
-        pthread_t thread;
-        if (pthread_create(&thread, NULL, handle_client_request, client_fd_ptr) != 0) {
-            perror("Failed to create thread");
-            free(client_fd_ptr);  // Free the memory if thread creation fails
-            continue;
-        }
+        struct http_request *request = http_request_parse(*client_fd_ptr);
 
-        // Detach the thread
-        pthread_detach(thread);
+        if (strstr(request->path, "/GetJob") == NULL) {
+            if (!is_queue_full(&pq)) {
+                int priority = get_request_priority(request->path);
+                char *path_copy = strdup(request->path);
+                enqueue(&pq, path_copy, priority, *client_fd_ptr);
+                
+                fprintf(log_file, "%lu: Enqueued %s with priority %d\n", (unsigned long)pthread_self(), path_copy, priority);
+                fflush(log_file);
+
+                fprintf(log_file, "Queue Size: %d\n", pq.size);
+                fflush(log_file);
+            } else {
+                fprintf(log_file, "Queue is full, cannot enqueue %s\n", request->path);
+                fflush(log_file);
+                send_error_response(*client_fd_ptr, QUEUE_FULL, http_get_response_message(QUEUE_FULL));
+            }
+        } else {
+            if (!is_queue_empty(&pq)) {
+                PriorityQueueElement dequeuedElement = dequeue(&pq);
+                if (dequeuedElement.request != NULL) {
+                    fprintf(log_file, "%lu: Dequeued %s with priority %d\n", (unsigned long)pthread_self(), dequeuedElement.request, dequeuedElement.priority);
+                    fflush(log_file);
+                    http_start_response(*client_fd_ptr, OK);
+                    dprintf(*client_fd_ptr, "%s\n", dequeuedElement.request);
+                }
+            } else {
+                fprintf(log_file, "Queue is empty, cannot dequeue %s\n", request->path);
+                fflush(log_file);
+                send_error_response(*client_fd_ptr, QUEUE_EMPTY, http_get_response_message(QUEUE_EMPTY));
+            }
+            
+        }       
     }
 
     // Close the server socket
@@ -250,7 +268,61 @@ void exit_with_usage() {
     exit(EXIT_SUCCESS);
 }
 
+int extract_delay(const char *request) {
+    // Placeholder implementation
+    // Extract the delay from the request headers
+    // This is an example and should be adapted to your actual header format
+    int delay = 0;
+    // Parse request to find the delay value
+    return delay;
+}
+
+void *worker_thread_function(void *arg) {
+    while (1) {
+        PriorityQueueElement job;
+
+        // Wait for and pop a job from the queue
+        pthread_mutex_lock(&pq.mutex);
+        while (pq.size == 0) {
+            fprintf(log_file, "Worker Thread %lu waiting for queue to fill\n", (unsigned long)pthread_self());
+            fflush(log_file);
+            pthread_cond_wait(&pq.cond_var, &pq.mutex);
+        }
+        job = dequeue(&pq);
+        fprintf(log_file, "Worker Thread %lu dequeued %s\n", (unsigned long)pthread_self(), job.request);
+        fflush(log_file);
+        pthread_mutex_unlock(&pq.mutex);
+
+        // Process the job
+        int delay = extract_delay(job.request); // Implement this function to extract the delay from the request headers
+        if (delay > 0) {
+            sleep(delay); // Sleep for 'delay' seconds
+        }
+
+        // Serve the request
+        serve_request(job.client_fd); // Assuming serve_request is implemented to handle the request
+
+        // Clean up (if necessary)
+        free(job.request);
+    }
+
+    return NULL;
+}
+
+
 int main(int argc, char **argv) {
+    log_file = fopen("log.txt", "w");
+    if (!log_file) {
+        perror("Error opening log file");
+        return EXIT_FAILURE;
+    }
+
+    fprintf(log_file, "%sStarting new test%s\n", 
+    "--------------------------------------------------",
+    "--------------------------------------------------");
+    fflush(log_file);
+    // pthread_self(void);
+
     signal(SIGINT, signal_callback_handler);
 
     /* Default settings */
@@ -282,6 +354,21 @@ int main(int argc, char **argv) {
 
     init_priority_queue(&pq, max_queue_size);
 
+    pthread_t *worker_threads = malloc(num_workers * sizeof(pthread_t));
+    if (!worker_threads) {
+        perror("Failed to allocate memory for worker threads");
+        exit(EXIT_FAILURE);
+    }
+
+    for (int i = 0; i < num_workers; i++) {
+        if (pthread_create(&worker_threads[i], NULL, worker_thread_function, NULL) != 0) {
+            perror("Failed to create worker thread");
+            exit(EXIT_FAILURE);
+        }
+        fprintf(log_file, "Created worker thread id: %lu\n", (unsigned long)worker_threads[i]);
+        fflush(log_file);
+    }
+
     pthread_t *threads = malloc(num_listener * sizeof(pthread_t));
     if (!threads) {
         perror("Failed to allocate memory for threads");
@@ -300,15 +387,26 @@ int main(int argc, char **argv) {
             perror("Failed to create listener thread");
             exit(EXIT_FAILURE);
         }
+        // Log the thread ID
+        fprintf(log_file, "Created listener thread id: %lu\n", (unsigned long)threads[i]);
+        fflush(log_file);
     }
 
-    // Join threads (optional, based on your design)
+    fprintf(log_file, "Done creating listeners\n");
+    fflush(log_file);
+
     for (int i = 0; i < num_listener; i++) {
         pthread_join(threads[i], NULL);
     }
 
+    for (int i = 0; i < num_workers; i++) {
+        pthread_join(worker_threads[i], NULL);
+    }
+
+    free(worker_threads);
     free(threads);
-    free(listener_ports); // Assuming this was dynamically allocated
+    free(listener_ports);
     destroy_priority_queue(&pq);
+    fclose(log_file);
     return EXIT_SUCCESS;
 }

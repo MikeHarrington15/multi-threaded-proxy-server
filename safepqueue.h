@@ -5,8 +5,9 @@
 
 // Structure for a single queue element
 typedef struct {
-    char *request;   // The HTTP request
-    int priority;    // Priority of the request
+    char *request;     // The HTTP request
+    int priority;      // Priority of the request
+    int client_fd;     // Client file descriptor
 } PriorityQueueElement;
 
 // Structure for the priority queue
@@ -20,7 +21,9 @@ typedef struct {
 
 // Function declarations
 void init_priority_queue(PriorityQueue *pq, int capacity);
-void enqueue(PriorityQueue *pq, const char *request, int priority);
+int is_queue_full(PriorityQueue *pq);
+int is_queue_empty(PriorityQueue *pq);
+void enqueue(PriorityQueue *pq, const char *request, int priority, int client_fd);
 PriorityQueueElement dequeue(PriorityQueue *pq);
 void destroy_priority_queue(PriorityQueue *pq);
 
