@@ -1,4 +1,3 @@
-
 #ifndef PROXYSERVER_H
 #define PROXYSERVER_H
 
@@ -37,9 +36,12 @@ typedef enum scode {
  * Functions for parsing an HTTP request.
  */
 struct http_request {
+    char *httpreq;
+    int client_fd;
+    int priority;
     char *method;
     char *path;
-    char *delay;
+    int delay;
 };
 
 /*
@@ -51,6 +53,7 @@ void http_end_headers(int fd);
 void http_send_string(int fd, char *data);
 int http_send_data(int fd, char *data, size_t size);
 char *http_get_response_message(int status_code);
+
 
 void http_start_response(int fd, int status_code) {
     dprintf(fd, "HTTP/1.0 %d %s\r\n", status_code,
@@ -175,6 +178,71 @@ char *http_get_response_message(int status_code) {
     }
 }
 
+struct http_request *parse_client_request(int fd) {
+    char *read_buffer = malloc(LIBHTTP_REQUEST_MAX_SIZE + 1);
+    if (!read_buffer) http_fatal_error("Malloc failed");
+
+    int bytes_read = read(fd, read_buffer, LIBHTTP_REQUEST_MAX_SIZE);
+    read_buffer[bytes_read] = '\0'; /* Always null-terminate. */
+    printf("read buffer %s\n\n", read_buffer);
+
+    int delay = -1;
+    int priority = -1;
+    char *path = NULL;
+
+    int is_first = 1;
+    size_t size;
+
+    struct http_request *request = malloc(sizeof(struct http_request));
+    request->httpreq = strdup(read_buffer);
+
+    char *token = strtok(read_buffer, "\r\n");
+    while (token != NULL) {
+        size = strlen(token);
+        if (is_first) {
+            is_first = 0;
+            // get path
+            char *s1 = strstr(token, " ");
+            char *s2 = strstr(s1 + 1, " ");
+            size = s2 - s1 - 1;
+            path = strndup(s1 + 1, size);
+
+            if (strcmp(GETJOBCMD, path) == 0) {
+                break;
+            } else {
+                // get priority
+                s1 = strstr(path, "/");
+                s2 = strstr(s1 + 1, "/");
+                size = s2 - s1 - 1;
+                char *p = strndup(s1 + 1, size);
+                priority = atoi(p);
+            }
+        } else {
+            char *value = strstr(token, ":");
+            if (value) {
+                size = value - token - 1;  // -1 for space
+                if (strncmp("Delay", token, size) == 0) {
+                    delay = atoi(value + 2);  // skip `: `
+                }
+            }
+        }
+        token = strtok(NULL, "\r\n");
+    }
+
+    printf("\n\tParsed HTTP request:\n");
+    printf("\tPath: '%s'\n", path);
+    printf("\tPriority: '%d'\n", priority);
+    printf("\tDelay: '%d'\n\n", delay);
+
+    
+    request->client_fd = fd;
+    request->delay = delay;
+    request->priority = priority;
+    request->path = path;
+
+    free(read_buffer);
+    return request;
+}
 
 #endif
 

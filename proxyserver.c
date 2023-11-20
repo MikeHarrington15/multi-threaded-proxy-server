@@ -53,7 +53,7 @@ void send_error_response(int client_fd, status_code_t err_code, char *err_msg) {
  * forward the fileserver response to the client
  */
 // Create multiple threads that run serve request
-void serve_request(int client_fd) {
+void serve_request(QueuedRequest *request) {
     fprintf(log_file, "Worker Thread %lu inside serve request\n", (unsigned long)pthread_self());
     fflush(log_file);
     // create a fileserver socket
@@ -79,41 +79,40 @@ void serve_request(int client_fd) {
     if (connection_status < 0) {
         // failed to connect to the fileserver
         printf("Failed to connect to the file server\n");
-        send_error_response(client_fd, BAD_GATEWAY, "Bad Gateway");
+        http_start_response(request->client_fd, QUEUE_FULL);
         return;
     }
 
     fprintf(log_file, "Worker Thread %lu cconnected to fileserver\n", (unsigned long)pthread_self());
     fflush(log_file);
 
+    fprintf(log_file, "HTTP Request: %s\n", request->httpreq);
+    fflush(log_file);
+
     // successfully connected to the file server
     char *buffer = (char *)malloc(RESPONSE_BUFSIZE * sizeof(char));
-    fprintf(log_file, "Worker Thread %lu after malloc\n", (unsigned long)pthread_self());
-    fflush(log_file); 
-    // forward the client request to the fileserver
-    int bytes_read = recv(client_fd, buffer, RESPONSE_BUFSIZE, 0);
+    int ret = http_send_data(fileserver_fd, request->httpreq, strlen(request->httpreq));
+
+    if (ret < 0) {
+        fprintf(log_file, "Failed %lu after ret\n", (unsigned long)pthread_self());
+        fflush(log_file);
+    }
+
+    while(1) {
+        fprintf(log_file, "In loop %lu after malloc\n", (unsigned long)pthread_self());
+        fflush(log_file);
+        int bytes_read = recv(fileserver_fd, buffer, RESPONSE_BUFSIZE - 1, 0);
+        fprintf(log_file, "Worker Thread %lu after read()\n", (unsigned long)pthread_self());
+        fflush(log_file); 
+        if (bytes_read <= 0)
+            break;
+        ret = http_send_data(request->client_fd, buffer, bytes_read);
+        if (ret < 0)
+            send_error_response(request->client_fd, BAD_GATEWAY, "Bad Gateway");
+    }
+    
     fprintf(log_file, "Worker Thread %lu after read()\n", (unsigned long)pthread_self());
     fflush(log_file); 
-    int ret = http_send_data(fileserver_fd, buffer, bytes_read);
-    if (ret < 0) {
-        fprintf(log_file, "Worker Thread %lu request failed\n", (unsigned long)pthread_self());
-        fflush(log_file); 
-        printf("Failed to send request to the file server\n");
-        send_error_response(client_fd, BAD_GATEWAY, "Bad Gateway");
-    } else {
-        fprintf(log_file, "Worker Thread %lu request completed\n", (unsigned long)pthread_self());
-        fflush(log_file);        
-        // forward the fileserver response to the client
-        while (1) {
-            int bytes_read = recv(fileserver_fd, buffer, RESPONSE_BUFSIZE - 1, 0);
-            if (bytes_read <= 0) // fileserver_fd has been closed, break
-                break;
-            ret = http_send_data(client_fd, buffer, bytes_read);
-            if (ret < 0) { // write failed, client_fd has been closed
-                break;
-            }
-        }
-    }
 
     // close the connection to the fileserver
     shutdown(fileserver_fd, SHUT_WR);
@@ -121,22 +120,6 @@ void serve_request(int client_fd) {
 
     // Free resources and exit
     free(buffer);
-}
-
-int get_request_priority(const char *request) {
-    const char *start = strchr(request, '/');
-    if (start != NULL) {
-        start++; // Move past the first '/'
-        const char *end = strchr(start, '/');
-        if (end != NULL) {
-            size_t length = end - start;
-            char *priorityStr = strndup(start, length);
-            int priority = atoi(priorityStr);
-            free(priorityStr);
-            return priority;
-        }
-    }
-    return -1;
 }
 
 int server_fd;
@@ -196,37 +179,61 @@ void *serve_forever(void *arg) {
                inet_ntoa(client_address.sin_addr),
                ntohs(client_address.sin_port));
 
-        struct http_request *request = http_request_parse(*client_fd_ptr);
+        struct http_request *request = parse_client_request(*client_fd_ptr);
 
         if (strstr(request->path, GETJOBCMD) == NULL) {
-            if (!is_queue_full(&pq)) {
-                int priority = get_request_priority(request->path);
-                char *path_copy = strdup(request->path);
-                add_work(&pq, path_copy, priority, *client_fd_ptr);
+            if (add_work(&pq, request->path, request->priority, request->client_fd, request->delay, request->httpreq)) {
+    
                 
-                fprintf(log_file, "%lu: Enqueued %s with priority %d\n", (unsigned long)pthread_self(), path_copy, priority);
+                fprintf(log_file, "%lu: Enqueued %s with priority %d and delay: %d, Queue Size: %d\n", (unsigned long)pthread_self(), request->path, request->priority, request->delay,  pq.size);
                 fflush(log_file);
 
-                fprintf(log_file, "Queue Size: %d\n", pq.size);
-                fflush(log_file);
             } else {
                 fprintf(log_file, "Queue is full, cannot enqueue %s\n", request->path);
                 fflush(log_file);
-                send_error_response(*client_fd_ptr, QUEUE_FULL, http_get_response_message(QUEUE_FULL));
+
+                http_start_response(*client_fd_ptr, QUEUE_FULL);
+                http_send_header(*client_fd_ptr, "Content-Type", "text/plain");
+                http_end_headers(*client_fd_ptr);
+                char *message = "Error: Queue is full.";
+                http_send_string(*client_fd_ptr, message);
+
+                shutdown(request->client_fd, SHUT_WR);
+                close(request->client_fd);
+
+                fprintf(log_file, "Response sent %s\n", request->path);
+                fflush(log_file);
             }
         } else {
-            if (!is_queue_empty(&pq)) {
-                PriorityQueueElement dequeuedElement = get_work(&pq);
-                if (dequeuedElement.request != NULL) {
-                    fprintf(log_file, "%lu: Dequeued %s with priority %d\n", (unsigned long)pthread_self(), dequeuedElement.request, dequeuedElement.priority);
-                    fflush(log_file);
-                    http_start_response(*client_fd_ptr, OK);
-                    dprintf(*client_fd_ptr, "%s\n", dequeuedElement.request);
-                }
+            QueuedRequest *get_request = try_get_work(&pq);
+            if (get_request) {
+                fprintf(log_file, "%lu: GETJOB %s with priority %d\n", (unsigned long)pthread_self(), get_request->path, get_request->priority);
+                fflush(log_file);
+
+                http_start_response(get_request->client_fd, OK);
+                http_send_header(get_request->client_fd, "Content-Type", "text/plain");
+                http_end_headers(get_request->client_fd);
+                http_send_string(get_request->client_fd, get_request->path);
+
+                shutdown(get_request->client_fd, SHUT_WR);
+                close(get_request->client_fd);
+
+                fprintf(log_file, "Response sent %s\n", get_request->path);
+                fflush(log_file);
             } else {
                 fprintf(log_file, "Queue is empty, cannot dequeue %s\n", request->path);
                 fflush(log_file);
-                send_error_response(*client_fd_ptr, QUEUE_EMPTY, http_get_response_message(QUEUE_EMPTY));
+
+                http_start_response(*client_fd_ptr, QUEUE_EMPTY);
+                http_send_header(*client_fd_ptr, "Content-Type", "text/plain");
+                http_end_headers(*client_fd_ptr);
+                http_send_string(*client_fd_ptr, "Error: Queue is empty.");
+
+                shutdown(request->client_fd, SHUT_WR);
+                close(request->client_fd);
+
+                fprintf(log_file, "Response sent for empty queue %s\n", request->path);
+                fflush(log_file);
             }
             
         }       
@@ -282,50 +289,28 @@ void exit_with_usage() {
     exit(EXIT_SUCCESS);
 }
 
-int extract_delay(const char *request) {
-    // Placeholder implementation
-    // Extract the delay from the request headers
-    // This is an example and should be adapted to your actual header format
-    int delay = 0;
-    // Parse request to find the delay value
-    return delay;
-}
-
 void *worker_thread_function(void *arg) {
     while (1) {
-        PriorityQueueElement job;
+        QueuedRequest *request = get_work(&pq);
 
-        // Wait for and pop a job from the queue
-        pthread_mutex_lock(&pq.mutex);
-        while (pq.size == 0) {
-            fprintf(log_file, "Worker Thread %lu waiting for queue to fill\n", (unsigned long)pthread_self());
+        fprintf(log_file, "Worker Thread %lu dequeued %s\n", (unsigned long)pthread_self(), request->path);
+        fflush(log_file);
+
+        if (request->delay > 0) {
+            fprintf(log_file, "Worker Thread %lu delaying %d\n", (unsigned long)pthread_self(), request->delay);
             fflush(log_file);
-            pthread_cond_wait(&pq.cond_var, &pq.mutex);
-            fprintf(log_file, "Signal recieved by Worker Thread %lu with Queue Size %d\n", (unsigned long)pthread_self(), pq.size);
+            sleep(request->delay); // Sleep for 'delay' seconds
+            fprintf(log_file, "Worker Thread %lu done sleeping\n", (unsigned long)pthread_self());
             fflush(log_file);
         }
-        fprintf(log_file, "Worker Thread %lu outside of wait\n", (unsigned long)pthread_self());
-        fflush(log_file);
-        job = get_work(&pq);
-        fprintf(log_file, "Worker Thread %lu dequeued %s\n", (unsigned long)pthread_self(), job.request);
-        fflush(log_file);
-        pthread_mutex_unlock(&pq.mutex);
 
-        // Process the job
-        int delay = extract_delay(job.request); // Implement this function to extract the delay from the request headers
-        if (delay > 0) {
-            sleep(delay); // Sleep for 'delay' seconds
-        }
-
-        fprintf(log_file, "Worker Thread %lu client fd %d\n", (unsigned long)pthread_self(), job.client_fd);
+        fprintf(log_file, "Worker Thread %lu client fd %d\n", (unsigned long)pthread_self(), request->client_fd);
         fflush(log_file);
 
         // Serve the request
-        serve_request(job.client_fd); // Assuming serve_request is implemented to handle the request
-        fprintf(log_file, "Worker Thread %lu served request %s\n", (unsigned long)pthread_self(), job.request);
+        serve_request(request); // Assuming serve_request is implemented to handle the request
+        fprintf(log_file, "Worker Thread %lu served request %s\n", (unsigned long)pthread_self(), request->path);
         fflush(log_file);
-        // Clean up (if necessary)
-        free(job.request);
     }
 
     return NULL;
@@ -376,22 +361,7 @@ int main(int argc, char **argv) {
 
     create_queue(&pq, max_queue_size);
 
-    pthread_t *worker_threads = malloc(num_workers * sizeof(pthread_t));
-    if (!worker_threads) {
-        perror("Failed to allocate memory for worker threads");
-        exit(EXIT_FAILURE);
-    }
-
-    for (int i = 0; i < num_workers; i++) {
-        if (pthread_create(&worker_threads[i], NULL, worker_thread_function, NULL) != 0) {
-            perror("Failed to create worker thread");
-            exit(EXIT_FAILURE);
-        }
-        fprintf(log_file, "Created worker thread id: %lu\n", (unsigned long)worker_threads[i]);
-        fflush(log_file);
-    }
-
-    pthread_t *threads = malloc(num_listener * sizeof(pthread_t));
+     pthread_t *threads = malloc(num_listener * sizeof(pthread_t));
     if (!threads) {
         perror("Failed to allocate memory for threads");
         exit(EXIT_FAILURE);
@@ -416,6 +386,22 @@ int main(int argc, char **argv) {
 
     fprintf(log_file, "Done creating listeners\n");
     fflush(log_file);
+
+    pthread_t *worker_threads = malloc(num_workers * sizeof(pthread_t));
+    if (!worker_threads) {
+        perror("Failed to allocate memory for worker threads");
+        exit(EXIT_FAILURE);
+    }
+
+    for (int i = 0; i < num_workers; i++) {
+        if (pthread_create(&worker_threads[i], NULL, worker_thread_function, NULL) != 0) {
+            perror("Failed to create worker thread");
+            exit(EXIT_FAILURE);
+        }
+        fprintf(log_file, "Created worker thread id: %lu\n", (unsigned long)worker_threads[i]);
+        fflush(log_file);
+    }
+
 
     for (int i = 0; i < num_listener; i++) {
         pthread_join(threads[i], NULL);
