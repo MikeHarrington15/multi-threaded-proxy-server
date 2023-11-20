@@ -54,17 +54,12 @@ void send_error_response(int client_fd, status_code_t err_code, char *err_msg) {
  */
 // Create multiple threads that run serve request
 void serve_request(QueuedRequest *request) {
-    fprintf(log_file, "Worker Thread %lu inside serve request\n", (unsigned long)pthread_self());
-    fflush(log_file);
     // create a fileserver socket
     int fileserver_fd = socket(PF_INET, SOCK_STREAM, 0);
     if (fileserver_fd == -1) {
         fprintf(stderr, "Failed to create a new socket: error %d: %s\n", errno, strerror(errno));
         exit(errno);
     }
-
-    fprintf(log_file, "Worker Thread %lu created fileserver sockets\n", (unsigned long)pthread_self());
-    fflush(log_file);
 
     // create the full fileserver address
     struct sockaddr_in fileserver_address;
@@ -83,12 +78,6 @@ void serve_request(QueuedRequest *request) {
         return;
     }
 
-    fprintf(log_file, "Worker Thread %lu cconnected to fileserver\n", (unsigned long)pthread_self());
-    fflush(log_file);
-
-    fprintf(log_file, "HTTP Request: %s\n", request->httpreq);
-    fflush(log_file);
-
     // successfully connected to the file server
     char *buffer = (char *)malloc(RESPONSE_BUFSIZE * sizeof(char));
     int ret = http_send_data(fileserver_fd, request->httpreq, strlen(request->httpreq));
@@ -99,20 +88,13 @@ void serve_request(QueuedRequest *request) {
     }
 
     while(1) {
-        fprintf(log_file, "In loop %lu after malloc\n", (unsigned long)pthread_self());
-        fflush(log_file);
         int bytes_read = recv(fileserver_fd, buffer, RESPONSE_BUFSIZE - 1, 0);
-        fprintf(log_file, "Worker Thread %lu after read()\n", (unsigned long)pthread_self());
-        fflush(log_file); 
         if (bytes_read <= 0)
             break;
         ret = http_send_data(request->client_fd, buffer, bytes_read);
         if (ret < 0)
             send_error_response(request->client_fd, BAD_GATEWAY, "Bad Gateway");
     }
-    
-    fprintf(log_file, "Worker Thread %lu after read()\n", (unsigned long)pthread_self());
-    fflush(log_file); 
 
     // close the connection to the fileserver
     shutdown(fileserver_fd, SHUT_WR);
@@ -164,22 +146,35 @@ void *serve_forever(void *arg) {
     printf("Listening on port %d...\n", listener_port);
 
     while (1) {
+        fprintf(log_file, "%lu: Top of while loop in serve_forever\n", (unsigned long)pthread_self());
+        fflush(log_file);
         struct sockaddr_in client_address;
         socklen_t client_address_length = sizeof(client_address);
         int *client_fd_ptr = malloc(sizeof(int));  // Dynamically allocate memory to pass to the thread
 
+        fprintf(log_file, "%lu: 1\n", (unsigned long)pthread_self());
+        fflush(log_file);
+
         *client_fd_ptr = accept(server_fd, (struct sockaddr *)&client_address, &client_address_length);
         if (*client_fd_ptr < 0) {
+            fprintf(log_file, "%lu: 2.5\n", (unsigned long)pthread_self());
+            fflush(log_file);
             perror("Error accepting socket");
             free(client_fd_ptr);  // Free the memory if accept fails
             continue;
         }
+
+        fprintf(log_file, "%lu: 2\n", (unsigned long)pthread_self());
+        fflush(log_file);
 
         printf("Accepted connection from %s on port %d\n",
                inet_ntoa(client_address.sin_addr),
                ntohs(client_address.sin_port));
 
         struct http_request *request = parse_client_request(*client_fd_ptr);
+
+        fprintf(log_file, "%lu: 3 %s\n", (unsigned long)pthread_self(), request->path);
+        fflush(log_file);
 
         if (strstr(request->path, GETJOBCMD) == NULL) {
             if (add_work(&pq, request->path, request->priority, request->client_fd, request->delay, request->httpreq)) {
@@ -201,7 +196,7 @@ void *serve_forever(void *arg) {
                 shutdown(request->client_fd, SHUT_WR);
                 close(request->client_fd);
 
-                fprintf(log_file, "Response sent %s\n", request->path);
+                fprintf(log_file, "%lu: Response sent %s\n",(unsigned long)pthread_self(), request->path);
                 fflush(log_file);
             }
         } else {
@@ -218,7 +213,7 @@ void *serve_forever(void *arg) {
                 shutdown(get_request->client_fd, SHUT_WR);
                 close(get_request->client_fd);
 
-                fprintf(log_file, "Response sent %s\n", get_request->path);
+                fprintf(log_file, "%lu: GETJOB response sent %s\n",(unsigned long)pthread_self(), get_request->path);
                 fflush(log_file);
             } else {
                 fprintf(log_file, "Queue is empty, cannot dequeue %s\n", request->path);
@@ -236,12 +231,15 @@ void *serve_forever(void *arg) {
                 fflush(log_file);
             }
             
-        }       
+        } 
+        fprintf(log_file, "%lu: Reached end of while in serve_forever\n", (unsigned long)pthread_self());
+        fflush(log_file);      
     }
 
+    
     // Close the server socket
-    shutdown(server_fd, SHUT_RDWR);
-    close(server_fd);
+    // shutdown(server_fd, SHUT_RDWR);
+    // close(server_fd);
 }
 
 /*
@@ -383,9 +381,6 @@ int main(int argc, char **argv) {
         fprintf(log_file, "Created listener thread id: %lu\n", (unsigned long)threads[i]);
         fflush(log_file);
     }
-
-    fprintf(log_file, "Done creating listeners\n");
-    fflush(log_file);
 
     pthread_t *worker_threads = malloc(num_workers * sizeof(pthread_t));
     if (!worker_threads) {
